@@ -14,6 +14,8 @@ RUN \
   WIREGUARD_RELEASE=$(curl -sL "http://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/APKINDEX.tar.gz" | tar -xz -C /tmp \
     && awk '/^P:wireguard-tools$/,/V:/' /tmp/APKINDEX | sed -n 2p | sed 's/^V://'); \
   fi && \
+  echo "**** upgrade base packages ****" && \
+  apk upgrade --no-cache && \
   echo "**** install dependencies ****" && \
   apk add --no-cache \
     bc \

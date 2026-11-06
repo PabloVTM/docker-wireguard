@@ -1,0 +1,158 @@
+name: build-test-publish
+
+on:
+  push:
+    branches: [master]
+    # date versions, e.g. 2026-11-06
+    tags: ['[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]']
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # weekly rebuild to pull in Alpine security updates (Monday 04:00 UTC)
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Build and smoke test (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: wireguard:test
+          # always rebuild from the latest base so apk upgrade picks up security fixes
+          pull: true
+          no-cache: true
+
+      - name: Check required binaries are installed
+        run: |
+          docker run --rm --entrypoint sh wireguard:test -c '
+            for bin in wg wg-quick coredns ip iptables qrencode; do
+              command -v "$bin" || { echo "missing: $bin"; exit 1; }
+            done'
+
+      - name: Load wireguard kernel module on the runner
+        # the image waits forever if the module is not active
+        run: sudo modprobe wireguard
+
+      - name: Server mode generates configs
+        run: |
+          docker run -d --name wg-test \
+            --cap-add NET_ADMIN \
+            -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC \
+            -e SERVERURL=test.example.com \
+            -e PEERS=peer1,peer2 \
+            wireguard:test
+
+          for _ in $(seq 1 90); do
+            if docker logs wg-test 2>&1 | grep -q '\[ls.io-init\] done.'; then
+              break
+            fi
+            sleep 1
+          done
+          docker logs wg-test 2>&1 | grep -q '\[ls.io-init\] done.'
+
+          # docker cp works whether or not the container is still running
+          docker cp wg-test:/config/wg_confs/wg0.conf "$RUNNER_TEMP/wg0.conf"
+          test "$(grep -c '^\[Peer\]' "$RUNNER_TEMP/wg0.conf")" -eq 2
+
+      - name: Restart against existing config
+        run: |
+          docker restart wg-test
+          for _ in $(seq 1 90); do
+            if docker logs wg-test 2>&1 | grep -c '\[ls.io-init\] done.' | grep -q '^2$'; then
+              break
+            fi
+            sleep 1
+          done
+          docker logs wg-test 2>&1 | grep -c '\[ls.io-init\] done.' | grep -q '^2$'
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs wg-test || true
+
+      - name: Remove test container
+        if: always()
+        run: docker rm -f wg-test || true
+
+  publish:
+    name: Publish multi-arch image to GHCR
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the date git tag on scheduled builds
+      packages: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Compute today's date version
+        id: date
+        run: echo "today=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/wireguard
+          tags: |
+            # git tag 2026-11-06 -> image tag 2026-11-06
+            type=ref,event=tag
+            # monday rebuild -> image tag of the day
+            type=raw,value=${{ steps.date.outputs.today }},enable=${{ github.event_name == 'schedule' }}
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # always rebuild from the latest base so apk upgrade picks up security fixes
+          pull: true
+          no-cache: true
+
+      - name: Create the date git tag for scheduled builds
+        if: github.event_name == 'schedule'
+        # tags pushed with GITHUB_TOKEN do not re-trigger this workflow
+        run: |
+          tag="${{ steps.date.outputs.today }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "git tag ${tag} already exists, skipping"
+            exit 0
+          fi
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${tag}"
