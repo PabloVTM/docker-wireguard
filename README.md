@@ -16,7 +16,7 @@ Images are published to GitHub Container Registry for `linux/amd64` and `linux/a
 | Tag | Content |
 | --- | --- |
 | `ghcr.io/pablovtm/wireguard:latest` | Latest build of `master`. |
-| `ghcr.io/pablovtm/wireguard:YYYY-MM-DD` | Dated version, e.g. `2026-11-06`. A new one is built every Monday with the latest Alpine security updates. |
+| `ghcr.io/pablovtm/wireguard:YYYY-MM-DD` | Dated version, e.g. `2026-11-06`. Each build upgrades the Alpine packages, so a new dated version also brings the latest security fixes. |
 
 To use the published image instead of building locally, replace `build: .` with `image: ghcr.io/pablovtm/wireguard:latest` below.
 
@@ -156,6 +156,17 @@ docker inspect -f '{{ index .Config.Labels "build_version" }}' wireguard
 ```
 
 To update, rebuild the image (`docker compose build --no-cache`) and recreate the container. Your `/config` volume is kept.
+
+## Releasing
+
+Images are built by GitHub Actions. A push to `master` publishes `latest`; a dated version is published by pushing a tag named after the day:
+
+```bash
+git tag 2026-11-09
+git push origin 2026-11-09
+```
+
+The workflow tests the image first, then publishes `ghcr.io/pablovtm/wireguard:2026-11-09` and `latest` for `linux/amd64` and `linux/arm64`. There is no scheduled rebuild: tag a new version when you want one.
 
 ## Building
 

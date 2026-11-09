@@ -7,9 +7,6 @@ on:
     tags: ['[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]']
   pull_request:
   workflow_dispatch:
-  schedule:
-    # weekly rebuild to pull in Alpine security updates (Monday 04:00 UTC)
-    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
@@ -96,15 +93,11 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
-      contents: write # push the date git tag on scheduled builds
+      contents: read
       packages: write
     steps:
       - name: Check out code
         uses: actions/checkout@v7
-
-      - name: Compute today's date version
-        id: date
-        run: echo "today=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -127,8 +120,6 @@ jobs:
           tags: |
             # git tag 2026-11-06 -> image tag 2026-11-06
             type=ref,event=tag
-            # monday rebuild -> image tag of the day
-            type=raw,value=${{ steps.date.outputs.today }},enable=${{ github.event_name == 'schedule' }}
             type=ref,event=branch
             type=sha
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -144,15 +135,3 @@ jobs:
           # always rebuild from the latest base so apk upgrade picks up security fixes
           pull: true
           no-cache: true
-
-      - name: Create the date git tag for scheduled builds
-        if: github.event_name == 'schedule'
-        # tags pushed with GITHUB_TOKEN do not re-trigger this workflow
-        run: |
-          tag="${{ steps.date.outputs.today }}"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
-            echo "git tag ${tag} already exists, skipping"
-            exit 0
-          fi
-          git tag "${tag}" "${GITHUB_SHA}"
-          git push origin "refs/tags/${tag}"
